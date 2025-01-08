@@ -1,1 +1,133 @@
+apiVersion: apps/v1           
+kind: Deployment               # Тип Kubernetes-ресурса: Deployment
+metadata:                      
+  name: my-webapp              
+  labels:                      
+    app: my-webapp           
+spec:                         
+  replicas: 2                  #Количество подов по умолчанию. Минимум - 2 (до масштабирования HPA)
+  revisionHistoryLimit: 10     #Сколько ревизий Deployment'а хранить (для отката)
+  strategy:                   
+    type: RollingUpdate        
+    rollingUpdate:             
+      maxSurge: 1             #Сколько "лишних" подов можно создать сверх replicas во время обновления
+      maxUnavailable: 1       #Сколько подов может быть недоступно во время обновления
+  selector:                   
+    matchLabels:              
+      app: my-webapp           
+  template:                    
+    metadata:                  
+      labels:                  
+        app: my-webapp
+      annotations:
+        prometheus.io/scrape: "true"      #Настройка для Prometheus: включить сбор метрик
+        prometheus.io/path: "/metrics"    #Путь для метрик в контейнере (предположим, /metrics)
+        prometheus.io/port: "80"          #Порт, с которого собирать метрики  
+    spec:                     
+      affinity:             
+        podAntiAffinity:                                                       #Антиаффинность подов
+          requiredDuringSchedulingIgnoredDuringExecution: 
+            - labelSelector:                                                   #Какие метки ищем
+                matchExpressions:        
+                  - key: app           
+                    operator: In       
+                    values:            
+                      - my-webapp      
+              topologyKey: "kubernetes.io/hostname"          #На одной ноде не должны располагаться два пода с такими же метками
+      containers:            
+        - name: my-webapp     
+          image: "my-registry/my-webapp:1.0.0"  
+          imagePullPolicy: IfNotPresent         
+          ports:                                 
+            - containerPort: 80                   
+              name: http                         
+          env:                                  
+            - name: ENVIRONMENT                  
+              value: "production"              
+          resources:                             
+            requests:                             #Минимально гарантированные ресурсы
+              cpu: "200m"                         #чуть выше 0.1 ,чтобы на старте было "просторнее"
+              memory: "128Mi"                     
+            limits:                               #Жёсткие лимиты по ресурсам
+              cpu: "500m"                         #даём возможность брать до 0.5 CPU для первых запросов
+              memory: "256Mi"                     
+          readinessProbe:                         #Проба готовности (Readiness Probe)
+            httpGet:                             
+              path: /health                      
+              port: http                         
+            initialDelaySeconds: 10               #ждём 10 секунд, давая приложению время инициализироваться
+            periodSeconds: 5                      #Как часто повторять проверку (секунды)
+            timeoutSeconds: 2                     #Сколько ждать ответ (секунды)
+          livenessProbe:                          #Проба живости (Liveness Probe)
+            httpGet:                              
+              path: /health                      
+              port: http                         
+            initialDelaySeconds: 15               #запускаем "живость" проверку чуть позже (15 c)
+            periodSeconds: 5                      #Периодичность (каждые 5 секунд)
+            timeoutSeconds: 2                     #Сколько ждать ответ (секунды)
+
+---
+apiVersion: v1                  
+kind: Service                   #Тип ресурса: Service
+metadata:                      
+  name: my-webapp-service      
+  labels:                      
+    app: my-webapp             
+spec:                           
+  type: ClusterIP               #Тип сервиса: ClusterIP (доступен внутри кластера)
+  selector:                     #Каким подам перенаправлять трафик
+    app: my-webapp              
+  ports:                        #Список портов, которые сервис "пробрасывает"
+    - name: http               
+      protocol: TCP            
+      port: 80                  #Порт, на котором сервис доступен внутри кластера
+      targetPort: 80            #Порт контейнера, на который сервис перенаправляет
+
+---
+apiVersion: autoscaling/v2     
+kind: HorizontalPodAutoscaler   #Тип ресурса: HorizontalPodAutoscaler
+metadata:                      
+  name: my-webapp-hpa           
+  labels:                      
+    app: my-webapp              
+spec:                          
+  scaleTargetRef:               #Какой ресурс масштабируем
+    apiVersion: apps/v1         
+    kind: Deployment            #Тип масштабируемого объекта: Deployment
+    name: my-webapp            
+  minReplicas: 2                #Минимальное количество подов(нужна отказоустойчивость)
+  maxReplicas: 6                #Максимальное количество подов
+  metrics:                     
+    - type: Resource            #Тип метрики: "Resource" (CPU, Memory и т.д.)
+      resource:                 
+        name: cpu               
+        target:                
+          type: Utilization     #Смотрим отношение к requests (в %)
+          averageUtilization: 50  #при превышении ~50% загрузки CPU от requests добавляем поды
+
+---
+apiVersion: networking.k8s.io/v1  
+kind: Ingress                          #Тип ресурса: Ingress
+metadata:                          
+  name: my-webapp-ingress          
+  labels:                          
+    app: my-webapp                 
+  annotations:                     
+    kubernetes.io/ingress.class: "nginx"   #Используем Ingress-класс Nginx
+spec:                             
+  rules:                               #Правила маршрутизации
+    - host: my-webapp.example.com      #Хост, на который будет приходить запрос
+      http:                          
+        paths:                         #Список путей
+          - path: /               
+            pathType: Prefix      
+            backend:                  #Какой backend обрабатывает запрос
+              service:                #Ссылаемся на сервис
+                name: my-webapp-service  
+                port:             
+                  number: 80      
+  tls:                            
+    - hosts:                         #Список хостов, для которых нужен TLS
+        - my-webapp.example.com    
+      secretName: my-webapp-tls      #Секрет, в котором хранится сертификат для TLS
 
